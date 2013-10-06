@@ -3,8 +3,8 @@
 OBJS = hash.o hashtable.o tailall.o
 
 CC = gcc
-CFLAGS = -Wall -g -c -DDEBUG
-#CFLAGS = -Wall -g -c
+#CFLAGS = -Wall -g -c -DDEBUG
+CFLAGS = -Wall -g -c
 CFLAGS_RELEASE = -Wall -g -c
 
 LDFLAGS	= 

@@ -1,10 +1,16 @@
+/*
+ * Author   : Jinoos Lee (jinoos@gmail.com)
+ * Date     : 2013/10/07
+ * URL      : https://github.com/jinoos/tailall
+ */
+
 #ifndef _TALLALL_H_
 #define _TALLALL_H_
 
 #include "hashtable.h"
 
 #define MAX_DIR_NAME_LENGTH     8192
-#define FILE_BUF_SIZE           4096
+#define FILE_BUF_SIZE           1024*64
 
 #ifdef DEBUG
 #define debugf(...) {fprintf(stdout, "Debug - "); fprintf(stdout, __VA_ARGS__);}
@@ -70,18 +76,30 @@ typedef struct _tailall_t
     int             inotify;
 } tailall_t;
 
+
+//
+//
+//
+
 // Integer to char*, same with strdup
-char* intdup(const int i);
+char*           intdup(const int i);
 
-tailall_t* tailall_init(const char *path);
+tailall_t*      tailall_init(const char *path);
 
-file_t* file_init(folder_t *folder, const char *name);
-void file_free(file_t *file);
+file_t*         file_init(folder_t *folder, const char *name);
+void            file_free(file_t *file);
 
-folder_t* folder_init(tailall_t *ta, const char *path);
-folder_t* folder_find(tailall_t *ta, const char *path);
-
-int tailing(file_t *file);
-void help();
+folder_t*       folder_init(tailall_t *ta, const char *path);
+void            folder_free(folder_t *folder);
+folder_t*       folder_find(tailall_t *ta, const char *path);
+file_t*         folder_put_file(folder_t *folder, file_t *file);
+file_t*         folder_find_file(folder_t *folder, const char *filename);
+file_t*         folder_remove_file(folder_t *folder, const char *filename);
+int             is_valid_dirname(const char *ent);
+int             is_dir(const char *path);
+int             scan_dir(tailall_t *ta, const char *path);
+void            watching(tailall_t *ta);
+int             tailing(file_t *file);
+void            help();
 
 #endif // _TALLALL_H_

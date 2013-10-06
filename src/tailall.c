@@ -1,3 +1,10 @@
+/*
+ * Author   : Jinoos Lee (jinoos@gmail.com)
+ * Date     : 2013/10/07
+ * Version  : 0.1
+ * URL      : https://github.com/jinoos/tailall
+ */
+
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -16,6 +23,64 @@
 
 #define EVENT_SIZE  ( sizeof (struct inotify_event) )
 #define BUF_LEN     ( 1024 * ( EVENT_SIZE + 16 ) )
+
+int main( int argc, char **argv )
+{
+    char dir[MAX_DIR_NAME_LENGTH]; /* monitoring directory name */
+    int fd, ret;
+    struct stat stat;
+    tailall_t *ta;
+
+    fd = inotify_init();
+
+    assert(fd > 0);
+
+    if(argc < 2)
+    {
+        debugf("Watching the current directory\n");
+        strcpy (dir, "./");
+    }else
+    {
+        debugf("Watching '%s' directory\n", argv[1]);
+        strcpy (dir, argv[1]);
+    }
+
+    ret = lstat(dir, &stat);
+    if(ret < 0)
+    {
+        errf("%s %s\n", strerror(errno), dir);
+        exit(-1);
+    }
+
+    if(S_ISDIR(stat.st_mode))
+    {
+        if(dir[(strlen(dir)-1)] != '/')
+        {
+            strcat(dir, "/");
+        }
+
+        ta = tailall_init(dir);
+        assert(ta != NULL);
+
+        ret = scan_dir(ta, dir);
+
+        watching(ta);
+
+        exit(0);
+    }else if(S_ISREG(stat.st_mode))
+    {
+        errf("Not allow to tail just a file. %s\n", dir);
+        help();
+        exit(-1);
+
+    }else
+    {
+        help();
+        exit(-1);
+    }
+
+    return 0;
+}
 
 char* intdup(const int i)
 {
@@ -66,7 +131,7 @@ file_t* file_init(folder_t *folder, const char *name)
     fd = open(buf, O_RDONLY);
     if(fd < 0)
     {
-        warnf("%s %s\n", strerror(errno), buf);
+        debugf("%s %s\n", strerror(errno), buf);
         return NULL;
     }
 
@@ -438,6 +503,7 @@ void watching(tailall_t *ta)
             {
                 char buf[MAX_DIR_NAME_LENGTH];
 
+                //
                 if (event->mask & IN_CREATE)
                 {
                     if (event->mask & IN_ISDIR)
@@ -452,9 +518,13 @@ void watching(tailall_t *ta)
                         debugf("The file %s%s was created.\n", folder->path, event->name);
 
                         file_t *file = file_init(folder, event->name);
-                        assert(file != NULL);
-                        folder_put_file(folder, file);
+                        if(file != NULL)
+                        {
+                            folder_put_file(folder, file);
+                        }
                     }
+
+                // 
                 } else if (event->mask & IN_DELETE)
                 {
                     if(event->mask & IN_ISDIR)
@@ -481,6 +551,8 @@ void watching(tailall_t *ta)
                             file_free(file);
                         }
                     }
+
+                //
                 } else if (event->mask & IN_DELETE_SELF)
                 {
                     if(event->mask & IN_ISDIR)
@@ -497,6 +569,8 @@ void watching(tailall_t *ta)
                             folder_free(folder);
                         }
                     }
+
+                //
                 } else if (event->mask & IN_MODIFY || event->mask & IN_CLOSE_WRITE)
                 {
                     if(event->mask & IN_ISDIR)
@@ -515,33 +589,41 @@ void watching(tailall_t *ta)
                         }else
                         {
                             file = file_init(folder, event->name);
-                            assert(file != NULL);
-                            file = folder_put_file(folder, file);
+                            if(file != NULL)
+                            {
+                                file = folder_put_file(folder, file);
+                            }
                         }
                     }
+
+                //
                 } else if (event->mask & IN_MOVED_FROM)
                 {
                     if (event->mask & IN_ISDIR)
                     {
-                        printf("The directory %s%s was moved from.\n", folder->path, event->name);
+                        debugf("The directory %s%s was moved from.\n", folder->path, event->name);
                     } else
                     {
-                        printf("The file %s%s was moved from.\n", folder->path, event->name);
+                        debugf("The file %s%s was moved from.\n", folder->path, event->name);
                     }
+
+                //
                 } else if (event->mask & IN_MOVED_TO)
                 {
                     if (event->mask & IN_ISDIR)
                     {
-                        printf("The directory %s%s was moved to.\n", folder->path, event->name);
+                        debugf("The directory %s%s was moved to.\n", folder->path, event->name);
                     } else
                     {
-                        printf("The file %s%s was moved to.\n", folder->path, event->name);
+                        debugf("The file %s%s was moved to.\n", folder->path, event->name);
                     }
+
+                //
                 } else if (event->mask & IN_MOVE_SELF)
                 {
                     if (event->mask & IN_ISDIR)
                     {
-                        printf("The directory %s%s was moved.\n", folder->path, event->name);
+                        debugf("The directory %s%s was moved.\n", folder->path, event->name);
                         if(folder != NULL)
                         {
                             folder_free(folder);
@@ -565,16 +647,16 @@ int tailing(file_t *file)
 
     memset(buf, 0, FILE_BUF_SIZE);
 
-
     total = 0;
     while( (ret = read(file->fd, buf, FILE_BUF_SIZE)) > 0)
     {
         if(total == 0)
         {
-            outf("\n# %s%s\n", file->folder->path, file->name);
+            outf("\n# %s%s %d\n", file->folder->path, file->name, ret);
         }
 
-        printf("%s", buf);
+
+        fprintf(stdout, "%.*s", ret, buf);
         memset(buf, 0, FILE_BUF_SIZE);
         total += ret;
     }
@@ -588,120 +670,18 @@ int tailing(file_t *file)
 }
 
 
-/*
-int open_file(const char *filename)
-{
-    int fp = open(filename , O_RDONLY); 
-
-    file_table_init(3);
-
-    assert(fp >= 0);
-
-    if(fp < 0)
-    {
-        printf("Cannot open file %s\n", filename);
-        exit(-1);
-    }
-
-    char buf[FILE_BUF_SIZE];
-    int ret, total;
-
-    memset(buf, 0, FILE_BUF_SIZE);
-    total = 0;
-
-
-    printf("--- %d \n", errno);
-
-    // move fp to end of file.
-    ret = lseek(fp, 0, SEEK_END);
-    assert(ret >= 0);
-
-    return fp;
-}
-
-int print_once(const int fp)
-{
-    char buf[FILE_BUF_SIZE];
-    int ret, total;
-
-    memset(buf, 0, FILE_BUF_SIZE);
-    total = 0;
-
-    while(ret = read(fp, buf, FILE_BUF_SIZE) > 0)
-    {
-        printf("%d %s", ret, buf);
-        memset(buf, 0, FILE_BUF_SIZE);
-        total += ret;
-    }
-
-    if(ret < 0)
-    {
-        printf("%s\n",strerror(errno));
-    }
-
-    return total;
-}
-*/
-
-int main( int argc, char **argv )
-{
-    char dir[MAX_DIR_NAME_LENGTH]; /* monitoring directory name */
-    int fd, ret;
-    struct stat stat;
-    tailall_t *ta;
-
-    fd = inotify_init();
-
-    assert(fd > 0);
-
-    if(argc < 2)
-    {
-        debugf("Watching the current directory\n");
-        strcpy (dir, "./");
-    }else
-    {
-        debugf("Watching '%s' directory\n", argv[1]);
-        strcpy (dir, argv[1]);
-    }
-
-    ret = lstat(dir, &stat);
-    if(ret < 0)
-    {
-        errf("%s %s\n", strerror(errno), dir);
-        exit(-1);
-    }
-
-    if(S_ISDIR(stat.st_mode))
-    {
-        if(dir[(strlen(dir)-1)] != '/')
-        {
-            strcat(dir, "/");
-        }
-
-        ta = tailall_init(dir);
-        assert(ta != NULL);
-
-        ret = scan_dir(ta, dir);
-
-        watching(ta);
-
-        exit(0);
-    }else if(S_ISREG(stat.st_mode))
-    {
-        errf("Not allow to tail just a file only. %s\n", dir);
-        help();
-        exit(-1);
-
-    }else
-    {
-        errf("Only tailling directory or file. %s cannot be done.\n", dir);
-        exit(-1);
-    }
-
-    return 0;
-}
-
 void help()
 {
-    outf("Help : ~~~~ \n");
+    outf("Usage: [DIRECTORY]\n");
+    outf("\n");
+    outf("Example: ./tailall \n");
+    outf("\n");
+    outf("Tailing all files(only normal file) under a directory such as UNIX tail command,\n");
+    outf("even in sub-directories recursively.\n");
+    outf("\n");
+    outf("NFS(Network File System) file, symbolic link, FIFO and block device are not allow\n");
+    outf("to tail by tailall.\n");
+    outf("\n");
+    outf("DIRECTORY is the target to be watched. It watchs current directory (./), If no DIRECTORY.\n");
+    outf("\n");
 }

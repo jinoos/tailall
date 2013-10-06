@@ -672,6 +672,7 @@ int tailing(file_t *file)
 
 void help()
 {
+    outf("\n");
     outf("Usage: [DIRECTORY]\n");
     outf("\n");
     outf("Example: ./tailall \n");
@@ -679,9 +680,10 @@ void help()
     outf("Tailing all files(only normal file) under a directory such as UNIX tail command,\n");
     outf("even in sub-directories recursively.\n");
     outf("\n");
-    outf("NFS(Network File System) file, symbolic link, FIFO and block device are not allow\n");
-    outf("to tail by tailall.\n");
+    outf("NFS(Network File System) file, symbolic link, FIFO and block device will be\n");
+    outf("ignored, due to some reasons.");
     outf("\n");
-    outf("DIRECTORY is the target to be watched. It watchs current directory (./), If no DIRECTORY.\n");
+    outf("DIRECTORY is the target to be watched. It watchs current directory (./), if\n");
+    outf("no DIRECTORY.\n");
     outf("\n");
 }

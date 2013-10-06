@@ -10,13 +10,12 @@
 #include <fcntl.h>
 #include <unistd.h>
 #include <dirent.h>
+#include <unistd.h>
 
 #include "tailall.h"
 
 #define EVENT_SIZE  ( sizeof (struct inotify_event) )
 #define BUF_LEN     ( 1024 * ( EVENT_SIZE + 16 ) )
-#define MAX_DIR_NAME_LENGTH     1024
-#define FILE_BUF_SIZE           4096
 
 char* intdup(const int i)
 {
@@ -33,14 +32,10 @@ tailall_t* tailall_init(const char *path)
 
     int             inotify_fd;
 
-    file_table_t    *file_table;
     folder_table_t  *folder_table;
 
     folder_table = folder_table_init(FOLDER_TABLE_DEFAULT_POWER);
     assert(folder_table != NULL);
-
-    file_table = file_table_init(FILE_TABLE_DEFAULT_POWER);
-    assert(file_table != NULL);
 
     inotify_fd = inotify_init();
     assert(inotify_fd >= 0);
@@ -48,103 +43,205 @@ tailall_t* tailall_init(const char *path)
     ta = calloc(sizeof(tailall_t), 1);
     assert(ta != NULL);
 
+    ta->inotify = inotify_fd;
     ta->path = strdup(path);
     ta->folder_table = folder_table;
-    ta->file_table = file_table;
     
     return ta;
 }
 
-file_t* file_init(const char *path)
+file_t* file_init(folder_t *folder, const char *name)
 {
-    assert(path != NULL);
+    assert(folder != NULL);
 
+    char buf[MAX_DIR_NAME_LENGTH];
     file_t *file;
     int fd, ret;
 
-    fd = open(path, O_RDONLY);
+    strcpy(buf, folder->path);
+    strcat(buf, name);
+
+    debugf("file_t init %s\n", buf);
+
+    fd = open(buf, O_RDONLY);
     if(fd < 0)
     {
-        fprintf(stderr, "Cannot open file %s\n", path);
+        warnf("%s %s\n", strerror(errno), buf);
         return NULL;
     }
+
+    // move to end of the file
+    ret = lseek(fd, 0, SEEK_END);
+    assert(ret >= 0);
 
     file = calloc(sizeof(file_t), 1);
     assert(file != NULL);
 
-    file->path = strdup(path);
+    file->folder = folder;
+    file->name = strdup(name);
     file->fd   = fd;
-
-    ret = lseek(file->fd, 0, SEEK_END);
-    assert(ret >= 0);
 
     return file;
 }
 
+void file_free(file_t *file)
+{
+    assert(file != NULL);
+
+    if(file->name != NULL)
+        free(file->name);
+
+    close(file->fd);
+
+    free(file);
+}
+
 folder_t* folder_init(tailall_t *ta, const char *path)
 {
+    assert(ta != NULL);
     assert(path != NULL);
 
-    struct stat stat;
     folder_t *folder;
-    int ret;
-
-    ret = lstat(path, &stat);
-
-    if(ret < 0)
-    {
-        if(ret && EACCES)
-        {
-            fprintf(stderr, "Error : Permission denied to watch \"%s\"\n", path);
-        }else
-        {
-            fprintf(stderr, "Error : Cannot watch \"%s\", due to unknown reason. lstat return %d\n", path, ret);
-        }
-
-        return NULL;
-    }
-
-    assert(!S_ISREG(stat.st_mode));
-
-    if(S_ISLNK(stat.st_mode))
-    {
-        fprintf(stderr, "Error : Cannot watch a Symblolic Link \"%s\"\n", path);
-        return NULL;
-    }
-
-    if(S_ISFIFO(stat.st_mode))
-    {
-        fprintf(stderr, "Error : Cannot watch a FIFO \"%s\"\n", path);
-        return NULL;
-    }
-
-    if(S_ISBLK(stat.st_mode))
-    {
-        fprintf(stderr, "Error : Cannot watch a Block Device \"%s\"\n", path);
-        return NULL;
-    }
-    
-    if(S_ISCHR(stat.st_mode))
-    {
-        fprintf(stderr, "Error : Cannot watch a Charictor Device \"%s\"\n", path);
-        return NULL;
-    }
-
-    if(S_ISSOCK(stat.st_mode))
-    {
-        fprintf(stderr, "Error : Cannot watch a Socket \"%s\"\n", path);
-        return NULL;
-    }
 
     folder = calloc(sizeof(folder_t), 1);
+    folder->ta = ta;
     assert(folder != NULL);
 
     folder->path = strdup(path);
 
-    folder->wd = inotify_add_watch(ta->inotify, path, IN_MODIFY | IN_CREATE | IN_DELETE | IN_MOVED_FROM | IN_MOVED_TO | IN_MOVE_SELF | IN_DELETE_SELF);
+    // IN_DONT_FOLLOW       : Don't dereference pathname if it is a symbolic link
+    folder->wd = inotify_add_watch(ta->inotify, path,   
+                                                        IN_CREATE |
+                                                        IN_CLOSE_WRITE |
+                                                        IN_DELETE |
+                                                        IN_DELETE_SELF |
+                                                        IN_MODIFY |
+                                                        IN_MOVE_SELF |
+                                                        IN_MOVED_FROM |
+                                                        IN_MOVED_TO
+                                                        );
     assert(folder->wd >= 0);
 
     return folder;
+}
+
+void folder_free(folder_t *folder)
+{
+    assert(folder != NULL);
+
+    debugf("folder_free %s\n", folder->path);
+
+    file_t *file, *file2;
+    int res;
+
+    folder_data_del(folder->ta->folder_table, folder->path);
+
+    file = folder->file_first;
+
+    while(file != NULL)
+    {
+        file2 = file->next;
+        file_free(file);
+        file = file2;
+    }
+
+    res = inotify_rm_watch(folder->ta->inotify, folder->wd);
+    if(res < 0)
+    {
+        warnf("%s\n", strerror(errno));
+    }
+
+    free(folder->path);
+    free(folder);
+}
+
+
+folder_t* folder_find(tailall_t *ta, const char *path)
+{
+    assert(path != NULL);
+
+    folder_data_t *folder_data;
+
+    folder_data = folder_data_get(ta->folder_table, path);
+    if(folder_data == NULL)
+        return NULL;
+
+    return (folder_t *)folder_data->data;
+}
+
+file_t* folder_put_file(folder_t *folder, file_t *file)
+{
+    assert(folder != NULL);
+    assert(file != NULL);
+
+    file_t *filep;
+
+    filep = folder->file_last;
+
+    if(filep == NULL)
+    {
+        folder->file_first = folder->file_last = file;
+    }else
+    {
+        folder->file_last = filep->next = file;
+        file->prev = filep;
+    }
+
+    return file;
+}
+
+file_t* folder_find_file(folder_t *folder, const char *filename)
+{
+    assert(folder != NULL);
+    assert(filename != NULL);
+
+    file_t *file;
+
+    file = folder->file_last;
+
+    if(file == NULL)
+        return NULL;
+
+    do
+    {
+        if(strcmp(file->name, filename) == 0)
+        {
+            return file;
+        }
+    } while((file = file->next) != NULL);
+
+    return NULL;
+}
+
+// return
+//   NULL : if not exists file 
+file_t* folder_remove_file(folder_t *folder, const char *filename)
+{
+    assert(folder != NULL);
+    assert(filename != NULL);
+
+    debugf("folder_remove_file %s %s\n", folder->path, filename);
+
+    file_t *file = folder_find_file(folder, filename);
+
+    if(file == NULL)
+        return NULL;
+
+    if(file == folder->file_first)
+        folder->file_first = file->next;
+
+    if(file == folder->file_last)
+        folder->file_last = file->prev;
+
+    if(file->next != NULL)
+        file->next->prev = NULL;
+
+    if(file->prev != NULL)
+        file->prev->next = NULL;
+
+    file->next = file->prev = NULL;
+
+    return file;
 }
 
 // return
@@ -182,39 +279,41 @@ int is_dir(const char *path)
 
         if(S_ISLNK(stat.st_mode))
         {
-            fprintf(stderr, "Ignored, due to a Symblolic Link \"%s\"\n", path);
+            warnf("Ignored, due to a symbolic link \"%s\"\n", path);
             return -1;
         }
 
         if(S_ISFIFO(stat.st_mode))
         {
-            fprintf(stderr, "Ignored, due to a FIFO \"%s\"\n", path);
+            warnf("Ignored, due to a FIFO \"%s\"\n", path);
             return -1;
         }
 
         if(S_ISBLK(stat.st_mode))
         {
-            fprintf(stderr, "Ignored, due to a Block Device \"%s\"\n", path);
+            warnf("Ignored, due to a block device \"%s\"\n", path);
             return -1;
         }
         
         if(S_ISCHR(stat.st_mode))
         {
-            fprintf(stderr, "Ignored, due to a Charictor Device \"%s\"\n", path);
+            warnf("Ignored, due to a charictor device \"%s\"\n", path);
             return -1;
         }
 
         if(S_ISSOCK(stat.st_mode))
         {
-            fprintf(stderr, "Ignored, due to a Socket \"%s\"\n", path);
+            warnf("Ignored, due to a socket \"%s\"\n", path);
             return -1;
         }
     }else
     {
         // error
-        fprintf(stderr, "Error, %s \"%s\"\n", strerror(errno), path);
+        errf("%s \"%s\"\n", strerror(errno), path);
         return -1;
     }
+
+    return -1;
 }
 
 // return
@@ -225,23 +324,42 @@ int scan_dir(tailall_t *ta, const char *path)
 {
     assert(path != NULL);
 
+    debugf("Start to scan directory %s\n", path);
+
     char buf[MAX_DIR_NAME_LENGTH], *bufp = buf;
+    char *wdstr;
     int ret;
-    struct stat stat;
     DIR *dir;
     struct dirent *ent;
+    folder_t *folder;
+    folder_data_t *folder_data, *folder_datap;
+    file_t *file;
 
     memset(buf, 0, MAX_DIR_NAME_LENGTH);
     strcpy(buf, path);
     bufp += strlen(path);
 
+    folder = folder_init(ta, buf);
+    assert(folder != NULL);
+
+    wdstr = intdup(folder->wd);
+
+    // must not be the folder in folder_table
+    assert(folder_data_get(ta->folder_table, wdstr) == NULL);
+
+    folder_data = folder_data_init(wdstr, folder);
+    assert(folder_data != NULL);
+
+    folder_datap = folder_data_set(ta->folder_table, folder_data);
+    assert(folder_datap != NULL);
+
     dir = opendir(path);
 
     if(dir == NULL)
     {
-        fprintf(stderr, "Error : %s, %s\n", strerror(errno), path);
+        warnf("%s, %s\n", strerror(errno), path);
 
-        if(errno && EACCES)
+        if(errno & EACCES)
         {
             return 0;
         }else
@@ -252,11 +370,10 @@ int scan_dir(tailall_t *ta, const char *path)
 
     while((ent = readdir(dir)) != NULL)
     {
-        fprintf(stdout, "Entry name : %s\n", ent->d_name);
 
         strcpy(bufp, ent->d_name);
 
-        ret = is_valid_dirname(buf);
+        ret = is_dir(buf);
 
         if(ret > 0)
         {
@@ -264,12 +381,24 @@ int scan_dir(tailall_t *ta, const char *path)
             if(is_valid_dirname(bufp))
             {
                 // valid directory
+                debugf("D %s\n", buf);
+
+                strcat(buf, "/");
+                scan_dir(ta, buf);
+                continue;
             }
-            
+
             // ignored invalid directory as '.', '..'
         }else if(ret == 0)
         {
             // file
+            debugf("F %s\n", buf);
+            
+            file = file_init(folder, ent->d_name);
+            if(file != NULL)
+            {
+                folder_put_file(folder, file);
+            }
         }
     }
 
@@ -278,7 +407,188 @@ int scan_dir(tailall_t *ta, const char *path)
     return 0;
 }
 
+void watching(tailall_t *ta)
+{
+    char buffer[BUF_LEN];
 
+    while(1)
+    {
+        int length, i = 0;
+
+        length = read(ta->inotify, buffer, BUF_LEN);
+
+        while (i < length)
+        {
+            struct inotify_event *event = (struct inotify_event *) &buffer[i];
+
+            debugf("wd=%d mask=%d cookie=%d len=%d dir=%s\n", event->wd, event->mask, event->cookie, event->len, (event->mask & IN_ISDIR)?"yes":"no");
+
+            
+
+            char *wd = intdup(event->wd);
+            folder_data_t *folder_data = folder_data_get(ta->folder_table, wd);
+            assert(folder_data != NULL);
+            folder_t *folder = (folder_t*) folder_data->data;
+            assert(folder_data != NULL);
+            free(wd);
+
+            debugf("Path : %s\n", folder->path);
+
+            if(event->len)
+            {
+                char buf[MAX_DIR_NAME_LENGTH];
+
+                if (event->mask & IN_CREATE)
+                {
+                    if (event->mask & IN_ISDIR)
+                    {
+                        debugf("The directory %s%s was created.\n", folder->path, event->name);      
+
+                        strcpy(buf, folder->path);
+                        strcat(buf, event->name);
+                        strcat(buf, "/");
+                        scan_dir(ta, buf);
+                    } else {
+                        debugf("The file %s%s was created.\n", folder->path, event->name);
+
+                        file_t *file = file_init(folder, event->name);
+                        assert(file != NULL);
+                        folder_put_file(folder, file);
+                    }
+                } else if (event->mask & IN_DELETE)
+                {
+                    if(event->mask & IN_ISDIR)
+                    {
+                        debugf("The directory %s%s was deleted.\n", folder->path, event->name);      
+                        strcpy(buf, folder->path);
+                        strcat(buf, event->name);
+                        strcat(buf, "/");
+
+                        folder_t *folder = folder_find(ta, buf);
+
+                        if(folder != NULL)
+                        {
+                            folder_free(folder);
+                        }
+                    }else
+                    {
+                        debugf("The file %s%s was deleted.\n", folder->path, event->name);
+
+                        file_t *file = folder_remove_file(folder, event->name);
+
+                        if(file != NULL)
+                        {
+                            file_free(file);
+                        }
+                    }
+                } else if (event->mask & IN_DELETE_SELF)
+                {
+                    if(event->mask & IN_ISDIR)
+                    {
+                        debugf("The directory %s%s was deleted itself.\n", folder->path, event->name);      
+                        strcpy(buf, folder->path);
+                        strcat(buf, event->name);
+                        strcat(buf, "/");
+
+                        folder_t *folder = folder_find(ta, buf);
+
+                        if(folder != NULL)
+                        {
+                            folder_free(folder);
+                        }
+                    }
+                } else if (event->mask & IN_MODIFY || event->mask & IN_CLOSE_WRITE)
+                {
+                    if(event->mask & IN_ISDIR)
+                    {
+                        debugf("The directory %s - %s was modified.\n", folder->path, event->name);
+                        // can be ignored.
+                        debugf("Ignored, %s - %s/ directory modified.\n", folder->path, event->name);
+                    }else
+                    {
+                        debugf("The file %s - %s was modified.\n", folder->path, event->name);
+                        file_t *file = folder_find_file(folder, event->name);
+
+                        if(file != NULL)
+                        {
+                            tailing(file);
+                        }else
+                        {
+                            file = file_init(folder, event->name);
+                            assert(file != NULL);
+                            file = folder_put_file(folder, file);
+                        }
+                    }
+                } else if (event->mask & IN_MOVED_FROM)
+                {
+                    if (event->mask & IN_ISDIR)
+                    {
+                        printf("The directory %s%s was moved from.\n", folder->path, event->name);
+                    } else
+                    {
+                        printf("The file %s%s was moved from.\n", folder->path, event->name);
+                    }
+                } else if (event->mask & IN_MOVED_TO)
+                {
+                    if (event->mask & IN_ISDIR)
+                    {
+                        printf("The directory %s%s was moved to.\n", folder->path, event->name);
+                    } else
+                    {
+                        printf("The file %s%s was moved to.\n", folder->path, event->name);
+                    }
+                } else if (event->mask & IN_MOVE_SELF)
+                {
+                    if (event->mask & IN_ISDIR)
+                    {
+                        printf("The directory %s%s was moved.\n", folder->path, event->name);
+                        if(folder != NULL)
+                        {
+                            folder_free(folder);
+                        }
+                    }
+                }
+            }
+
+            i += EVENT_SIZE + event->len;
+        }
+    }
+
+}
+
+int tailing(file_t *file)
+{
+    assert(file != NULL);
+
+    char buf[FILE_BUF_SIZE];
+    int ret, total;
+
+    memset(buf, 0, FILE_BUF_SIZE);
+
+
+    total = 0;
+    while( (ret = read(file->fd, buf, FILE_BUF_SIZE)) > 0)
+    {
+        if(total == 0)
+        {
+            outf("\n# %s%s\n", file->folder->path, file->name);
+        }
+
+        printf("%s", buf);
+        memset(buf, 0, FILE_BUF_SIZE);
+        total += ret;
+    }
+
+    if(ret < 0)
+    {
+        warnf("%s\n",strerror(errno));
+    }
+
+    return total;
+}
+
+
+/*
 int open_file(const char *filename)
 {
     int fp = open(filename , O_RDONLY); 
@@ -331,118 +641,67 @@ int print_once(const int fp)
 
     return total;
 }
+*/
 
 int main( int argc, char **argv )
 {
     char dir[MAX_DIR_NAME_LENGTH]; /* monitoring directory name */
-    int fd, rstat, ret;
-    int wd; /* watch desc */
-    char buffer[BUF_LEN];
+    int fd, ret;
     struct stat stat;
     tailall_t *ta;
 
     fd = inotify_init();
+
     assert(fd > 0);
 
     if(argc < 2)
     {
-        fprintf (stderr, "Watching the current directory\n");
+        debugf("Watching the current directory\n");
         strcpy (dir, "./");
     }else
     {
-        fprintf (stderr, "Watching '%s' directory\n", argv[1]);
+        debugf("Watching '%s' directory\n", argv[1]);
         strcpy (dir, argv[1]);
     }
 
-    rstat = lstat(dir, &stat);
-    assert(rstat >= 0);
+    ret = lstat(dir, &stat);
+    if(ret < 0)
+    {
+        errf("%s %s\n", strerror(errno), dir);
+        exit(-1);
+    }
 
     if(S_ISDIR(stat.st_mode))
     {
-        printf("directory %s\n", dir);
-
         if(dir[(strlen(dir)-1)] != '/')
         {
             strcat(dir, "/");
         }
-
-        printf("new dirname %s\n", dir);
 
         ta = tailall_init(dir);
         assert(ta != NULL);
 
         ret = scan_dir(ta, dir);
 
-        printf("Scaned. %d\n", ret);
+        watching(ta);
+
         exit(0);
-
-
     }else if(S_ISREG(stat.st_mode))
     {
-        printf("file %s\n", dir);
-
-        int fp = open_file(dir);
-        assert(fp >= 0);
-
-        int ret;
-
-        ret = print_once(fp);
-
-        printf("ret %d\n", ret);
+        errf("Not allow to tail just a file only. %s\n", dir);
+        help();
+        exit(-1);
 
     }else
     {
-        printf("Unknonwn file type.\n");
+        errf("Only tailling directory or file. %s cannot be done.\n", dir);
+        exit(-1);
     }
 
-
-//    printf("dirname %s\n", dirname(strdup(dir)));
-//    printf("basename %s\n", basename(strdup(dir)));
-
-    wd = inotify_add_watch(fd, dir, IN_MODIFY | IN_CREATE | IN_DELETE | IN_MOVED_FROM | IN_MOVED_TO | IN_MOVE_SELF | IN_DELETE_SELF);
-
-    while(1) {
-        int length, i = 0;
-        length = read(fd, buffer, BUF_LEN);
-        if (length < 0) {
-            perror("read");
-        }
-        while (i < length) {
-            struct inotify_event *event = (struct inotify_event *) &buffer[i];
-            printf ("[debug] wd=%d mask=%d cookie=%d len=%d dir=%s\n", event->wd, event->mask, event->cookie, event->len, (event->mask & IN_ISDIR)?"yes":"no");
-            if (event->len) {
-                if (event->mask & IN_CREATE) {
-                    if (event->mask & IN_ISDIR) {
-                        printf("The directory %s/%s was created.\n", dir, event->name);      
-                    } else {
-                        printf("The file %s/%s was created.\n", dir, event->name);
-                    }
-                } else if (event->mask & IN_DELETE) {
-                    if (event->mask & IN_ISDIR) {
-                        printf("The directory %s/%s was deleted.\n", dir, event->name);      
-                    } else {
-                        printf("The file %s/%s was deleted.\n", dir, event->name);
-                    }
-                } else if (event->mask & IN_MODIFY) {
-                    if (event->mask & IN_ISDIR) {
-                        printf("The directory %s/%s was modified.\n", dir, event->name);
-                    } else {
-                        printf("The file %s/%s was modified.\n", dir, event->name);
-                    }
-                } else if (event->mask & IN_MOVED_FROM || event->mask & IN_MOVED_TO || event->mask & IN_MOVE_SELF) {
-                    if (event->mask & IN_ISDIR) {
-                        printf("The directory %s/%s was moved.\n", dir, event->name);
-                    } else {
-                        printf("The file %s/%s was moved.\n", dir, event->name);
-                    }
-                }
-            }
-            i += EVENT_SIZE + event->len;
-        }
-    }
-    /*
-       inotify_rm_watch(fd, wd);
-       close(fd);
-     */
     return 0;
+}
+
+void help()
+{
+    outf("Help : ~~~~ \n");
 }

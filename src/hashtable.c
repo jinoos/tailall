@@ -1,5 +1,6 @@
 #include <stdlib.h>
 #include <string.h>
+#include <stdio.h>
 
 #include "hashtable.h"
 
@@ -24,7 +25,7 @@ hashtable_t* hashtable_init(int hash_power_size, pthread_mutex_t *lock)
 
 hashtable_data_t* _hashtable_data_init(HASHTABLE_DATA_KEY key_type, char *key, void *data, void (*cb_data_free)(void *))
 {
-    if(key == NULL)
+    if(key == NULL || data == NULL)
         return NULL;
 
     HASH_KEY_LEN len = strlen(key);
@@ -95,6 +96,9 @@ hashtable_data_t* hashtable_get(hashtable_t *table, const char *key)
 
 hashtable_data_t* hashtable_get2(hashtable_t *table, const char *key, const HASH_KEY_LEN len)
 {
+	if(table == NULL || key == NULL)
+		return NULL;
+
     if(table->lock != NULL)
     {
         pthread_mutex_lock(table->lock);

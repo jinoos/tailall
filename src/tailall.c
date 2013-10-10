@@ -18,6 +18,7 @@
 #include <unistd.h>
 #include <dirent.h>
 #include <unistd.h>
+#include <malloc.h>
 
 #include "tailall.h"
 
@@ -31,24 +32,31 @@ int main( int argc, char **argv )
     struct stat stat;
     tailall_t *ta;
 
+    int verbose;
+
     fd = inotify_init();
 
     assert(fd > 0);
+    if(fd < 0)
+    {
+        errfn("inotify_init(), %s", strerror(errno));
+        exit(-1);
+    }
 
     if(argc < 2)
     {
-        debugf("Watching the current directory\n");
+        debugfn("Watching under current directory");
         strcpy (dir, "./");
     }else
     {
-        debugf("Watching '%s' directory\n", argv[1]);
+        debugfn("Watching '%s' directory", argv[1]);
         strcpy (dir, argv[1]);
     }
 
     ret = lstat(dir, &stat);
     if(ret < 0)
     {
-        errf("%s %s\n", strerror(errno), dir);
+        errfn("%s %s", strerror(errno), dir);
         exit(-1);
     }
 
@@ -69,10 +77,9 @@ int main( int argc, char **argv )
         exit(0);
     }else if(S_ISREG(stat.st_mode))
     {
-        errf("Not allow to tail just a file. %s\n", dir);
+        errfn("Not allow to tail just a file. %s", dir);
         help();
         exit(-1);
-
     }else
     {
         help();
@@ -84,8 +91,8 @@ int main( int argc, char **argv )
 
 char* intdup(const int i)
 {
-    char buf[33];
-    sprintf(buf, "%d", i);
+    char buf[37];
+    sprintf(buf, "int-%d", i);
     return strdup(buf);
 }
 
@@ -111,6 +118,8 @@ tailall_t* tailall_init(const char *path)
     ta->inotify = inotify_fd;
     ta->path = strdup(path);
     ta->folder_table = folder_table;
+    ta->last_tailing_file = NULL;
+    ta->tailing_count = 0;
     
     return ta;
 }
@@ -121,7 +130,7 @@ file_t* file_init(folder_t *folder, const char *name)
 
     char buf[MAX_DIR_NAME_LENGTH];
     file_t *file;
-    int fd, ret;
+    int fd;
 
     strcpy(buf, folder->path);
     strcat(buf, name);
@@ -135,10 +144,6 @@ file_t* file_init(folder_t *folder, const char *name)
         return NULL;
     }
 
-    // move to end of the file
-    ret = lseek(fd, 0, SEEK_END);
-    assert(ret >= 0);
-
     file = calloc(sizeof(file_t), 1);
     assert(file != NULL);
 
@@ -148,6 +153,12 @@ file_t* file_init(folder_t *folder, const char *name)
 
     return file;
 }
+
+off_t file_move_eof(file_t *file)
+{
+    return lseek(file->fd, 0, SEEK_END);
+}
+
 
 void file_free(file_t *file)
 {
@@ -167,6 +178,8 @@ folder_t* folder_init(tailall_t *ta, const char *path)
     assert(path != NULL);
 
     folder_t *folder;
+    folder_data_t *folder_data, *folder_datap;
+    char *wdstr;
 
     folder = calloc(sizeof(folder_t), 1);
     folder->ta = ta;
@@ -174,7 +187,6 @@ folder_t* folder_init(tailall_t *ta, const char *path)
 
     folder->path = strdup(path);
 
-    // IN_DONT_FOLLOW       : Don't dereference pathname if it is a symbolic link
     folder->wd = inotify_add_watch(ta->inotify, path,   
                                                         IN_CREATE |
                                                         IN_CLOSE_WRITE |
@@ -185,7 +197,26 @@ folder_t* folder_init(tailall_t *ta, const char *path)
                                                         IN_MOVED_FROM |
                                                         IN_MOVED_TO
                                                         );
-    assert(folder->wd >= 0);
+    if(folder->wd < 0)
+    {
+        warnfn("%s %s", strerror(errno), path);
+        free(folder->path);
+        free(folder);
+        return NULL;
+    }
+
+    wdstr = intdup(folder->wd);
+
+    // must not be the folder in folder_table
+    assert(folder_data_get(ta->folder_table, wdstr) == NULL);
+
+    folder_data = folder_data_init(wdstr, folder);
+    assert(folder_data != NULL);
+
+    free(wdstr);
+
+    folder_datap = folder_data_set(ta->folder_table, folder_data);
+    assert(folder_datap != NULL);
 
     return folder;
 }
@@ -198,8 +229,11 @@ void folder_free(folder_t *folder)
 
     file_t *file, *file2;
     int res;
-
-    folder_data_del(folder->ta->folder_table, folder->path);
+    char *wdstr;
+    
+    wdstr = intdup(folder->wd);
+    folder_data_del(folder->ta->folder_table, wdstr);
+    free(wdstr);
 
     file = folder->file_first;
 
@@ -211,9 +245,10 @@ void folder_free(folder_t *folder)
     }
 
     res = inotify_rm_watch(folder->ta->inotify, folder->wd);
+
     if(res < 0)
     {
-        warnf("%s\n", strerror(errno));
+        warnfn("inotify_rm_watch %s %d", strerror(errno), folder->wd);
     }
 
     free(folder->path);
@@ -344,37 +379,37 @@ int is_dir(const char *path)
 
         if(S_ISLNK(stat.st_mode))
         {
-            warnf("Ignored, due to a symbolic link \"%s\"\n", path);
+            warnfn("Ignored, due to a symbolic link %s", path);
             return -1;
         }
 
         if(S_ISFIFO(stat.st_mode))
         {
-            warnf("Ignored, due to a FIFO \"%s\"\n", path);
+            warnfn("Ignored, due to a FIFO %s", path);
             return -1;
         }
 
         if(S_ISBLK(stat.st_mode))
         {
-            warnf("Ignored, due to a block device \"%s\"\n", path);
+            warnfn("Ignored, due to a block device %s", path);
             return -1;
         }
         
         if(S_ISCHR(stat.st_mode))
         {
-            warnf("Ignored, due to a charictor device \"%s\"\n", path);
+            warnfn("Ignored, due to a charictor device %s", path);
             return -1;
         }
 
         if(S_ISSOCK(stat.st_mode))
         {
-            warnf("Ignored, due to a socket \"%s\"\n", path);
+            warnfn("Ignored, due to a socket %s", path);
             return -1;
         }
     }else
     {
         // error
-        errf("%s \"%s\"\n", strerror(errno), path);
+        errfn("%s %s", strerror(errno), path);
         return -1;
     }
 
@@ -392,12 +427,10 @@ int scan_dir(tailall_t *ta, const char *path)
     debugf("Start to scan directory %s\n", path);
 
     char buf[MAX_DIR_NAME_LENGTH], *bufp = buf;
-    char *wdstr;
     int ret;
     DIR *dir;
     struct dirent *ent;
     folder_t *folder;
-    folder_data_t *folder_data, *folder_datap;
     file_t *file;
 
     memset(buf, 0, MAX_DIR_NAME_LENGTH);
@@ -405,24 +438,16 @@ int scan_dir(tailall_t *ta, const char *path)
     bufp += strlen(path);
 
     folder = folder_init(ta, buf);
-    assert(folder != NULL);
-
-    wdstr = intdup(folder->wd);
-
-    // must not be the folder in folder_table
-    assert(folder_data_get(ta->folder_table, wdstr) == NULL);
-
-    folder_data = folder_data_init(wdstr, folder);
-    assert(folder_data != NULL);
-
-    folder_datap = folder_data_set(ta->folder_table, folder_data);
-    assert(folder_datap != NULL);
+    if(folder == NULL)
+    {
+        return -1;
+    }
 
     dir = opendir(path);
 
     if(dir == NULL)
     {
-        warnf("%s, %s\n", strerror(errno), path);
+        warnfn("%s, %s", strerror(errno), path);
 
         if(errno & EACCES)
         {
@@ -463,6 +488,7 @@ int scan_dir(tailall_t *ta, const char *path)
             if(file != NULL)
             {
                 folder_put_file(folder, file);
+                file_move_eof(file);
             }
         }
     }
@@ -479,6 +505,9 @@ void watching(tailall_t *ta)
     while(1)
     {
         int length, i = 0;
+        folder_t *folder;
+        folder_data_t *folder_data;
+        char *wdstr;
 
         length = read(ta->inotify, buffer, BUF_LEN);
 
@@ -486,18 +515,26 @@ void watching(tailall_t *ta)
         {
             struct inotify_event *event = (struct inotify_event *) &buffer[i];
 
-            debugf("wd=%d mask=%d cookie=%d len=%d dir=%s\n", event->wd, event->mask, event->cookie, event->len, (event->mask & IN_ISDIR)?"yes":"no");
+            debugf("watching() WD=%d MASK=%d COOKIE=%d LEN=%d DIR=%s\n", event->wd, event->mask, event->cookie, event->len, (event->mask & IN_ISDIR)?"yes":"no");
 
-            
-
-            char *wd = intdup(event->wd);
-            folder_data_t *folder_data = folder_data_get(ta->folder_table, wd);
+            wdstr = intdup(event->wd);
+            folder_data = folder_data_get(ta->folder_table, wdstr);
             assert(folder_data != NULL);
-            folder_t *folder = (folder_t*) folder_data->data;
-            assert(folder_data != NULL);
-            free(wd);
+            if(folder_data == NULL)
+            {
+                warnfn("Cannot find folder_data for WD %d", event->wd);
+                continue;
+            }
 
-            debugf("Path : %s\n", folder->path);
+            folder = (folder_t*) folder_data->data;
+            if(folder_data == NULL)
+            {
+                warnfn("folder_data doesn't include folder. folder_data_key:%s", folder_data->key);
+                continue;
+            }
+            free(wdstr);
+
+            debugf("Rise Path : %s\n", folder->path);
 
             if(event->len)
             {
@@ -522,6 +559,7 @@ void watching(tailall_t *ta)
                         {
                             folder_put_file(folder, file);
                         }
+                        tailing(ta, file);
                     }
 
                 // 
@@ -585,14 +623,16 @@ void watching(tailall_t *ta)
 
                         if(file != NULL)
                         {
-                            tailing(file);
+                            tailing(ta, file);
                         }else
                         {
                             file = file_init(folder, event->name);
                             if(file != NULL)
                             {
                                 file = folder_put_file(folder, file);
+                                file_move_eof(file);
                             }
+
                         }
                     }
 
@@ -638,9 +678,10 @@ void watching(tailall_t *ta)
 
 }
 
-int tailing(file_t *file)
+int tailing(tailall_t *ta, file_t *file)
 {
     assert(file != NULL);
+    assert(ta != NULL);
 
     char buf[FILE_BUF_SIZE];
     int ret, total;
@@ -648,22 +689,30 @@ int tailing(file_t *file)
     memset(buf, 0, FILE_BUF_SIZE);
 
     total = 0;
-    while( (ret = read(file->fd, buf, FILE_BUF_SIZE)) > 0)
+    while( (ret = read(file->fd, buf, FILE_BUF_SIZE-1)) > 0)
     {
-        if(total == 0)
+        if(total == 0 && ta->last_tailing_file != file)
         {
-            outf("\n# %s%s %d\n", file->folder->path, file->name, ret);
+            outfn(" ");
+            outfn("# %s%s", file->folder->path, file->name);
         }
 
-
-        fprintf(stdout, "%.*s", ret, buf);
+        outf("%.*s", ret, buf);
         memset(buf, 0, FILE_BUF_SIZE);
         total += ret;
     }
 
+    ta->last_tailing_file = file;
+
     if(ret < 0)
     {
-        warnf("%s\n",strerror(errno));
+        warnfn("tailing() %s",strerror(errno));
+    }
+
+    if((++ta->tailing_count % MALLOC_TRIM_TERM) == 0)
+    {
+        malloc_trim(0);
+        debugfn("tailing() malloc_trim has been done.");
     }
 
     return total;

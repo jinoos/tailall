@@ -13,14 +13,24 @@
 #define FILE_BUF_SIZE           1024*64
 
 #ifdef DEBUG
-#define debugf(...) {fprintf(stdout, "Debug - "); fprintf(stdout, __VA_ARGS__);}
+#define debugf(...) { fprintf(stdout, "DBUG - "); fprintf(stdout, __VA_ARGS__); fflush(stdout); }
+#define debugfn(...) { fprintf(stdout, "DBUG - "); fprintf(stdout, __VA_ARGS__); fprintf(stdout, "\n"); fflush(stdout); }
 #else
 #define debugf(...) 
+#define debugfn(...) 
 #endif
 
-#define warnf(...) {fprintf(stderr, "Warning - "); fprintf(stderr, __VA_ARGS__);}
-#define errf(...) {fprintf(stderr, "Error - "); fprintf(stderr, __VA_ARGS__);}
-#define outf(...) fprintf(stdout, __VA_ARGS__);
+#define errf(...) { fprintf(stderr, "ERR  - "); fprintf(stderr, __VA_ARGS__); fflush(stderr); }
+#define errfn(...) { fprintf(stderr, "ERR  - "); fprintf(stderr, __VA_ARGS__); fprintf(stderr, "\n");}
+
+#define warnf(...) { fprintf(stderr, "WARN - "); fprintf(stderr, __VA_ARGS__); fflush(stdout); }
+#define warnfn(...) { fprintf(stderr, "WARN - "); fprintf(stderr, __VA_ARGS__); fprintf(stdout, "\n"); fflush(stdout); }
+
+#define infof(...) { fprintf(stderr, "INFO - "); fprintf(stdout, __VA_ARGS__); fflush(stdout); }
+#define infofn(...) { fprintf(stderr, "INFO - "); fprintf(stdout, __VA_ARGS__); fprintf(stdout, "\n"); fflush(stdout); }
+
+#define outf(...) { fprintf(stdout, __VA_ARGS__); fflush(stdout); }
+#define outfn(...) { fprintf(stdout, __VA_ARGS__); fprintf(stdout, "\n"); fflush(stdout); }
 
 #define file_table_t        hashtable_t
 #define file_data_t         hashtable_data_t
@@ -38,7 +48,7 @@
 #define folder_data_t           hashtable_data_t
 
 #define folder_table_init(x)    hashtable_init(x,NULL)
-#define folder_data_init(x,y)   hashtable_data_init(x,y,NULL)
+#define folder_data_init(x,y)   hashtable_data_init_alloc(x,y,NULL)
 #define folder_data_get(x,y)    hashtable_get(x,y)
 #define folder_data_set(x,y)    hashtable_set(x,y)
 #define folder_data_del(x,y)    hashtable_del(x,y)
@@ -47,35 +57,38 @@ typedef struct _file_t file_t;
 typedef struct _folder_t folder_t;
 typedef struct _tailall_t tailall_t;
 
-typedef struct _file_t
+struct _file_t
 {
     char            *name;
     int             fd;
     folder_t        *folder;
     file_t          *next;
     file_t          *prev;
-} file_t;
+};
 
-typedef struct _folder_t
+struct _folder_t
 {
     tailall_t       *ta;
     char            *path;
     int             wd;     // watch desc
     file_t          *file_first;
     file_t          *file_last;
-} folder_t;
+};
 
 #define FOLDER_TABLE_DEFAULT_POWER  14
 #define FILE_TABLE_DEFAULT_POWER    16
+#define MALLOC_TRIM_TERM            100
 
-typedef struct _tailall_t
+
+struct _tailall_t
 {
     char            *path;
     folder_table_t  *folder_table;
     file_table_t    *file_table;
     int             inotify;
-} tailall_t;
-
+    file_t          *last_tailing_file;
+    uint64_t        tailing_count;
+};
 
 //
 //
@@ -88,6 +101,7 @@ tailall_t*      tailall_init(const char *path);
 
 file_t*         file_init(folder_t *folder, const char *name);
 void            file_free(file_t *file);
+off_t           file_move_eof(file_t *file);
 
 folder_t*       folder_init(tailall_t *ta, const char *path);
 void            folder_free(folder_t *folder);
@@ -99,7 +113,7 @@ int             is_valid_dirname(const char *ent);
 int             is_dir(const char *path);
 int             scan_dir(tailall_t *ta, const char *path);
 void            watching(tailall_t *ta);
-int             tailing(file_t *file);
+int             tailing(tailall_t *ta, file_t *file);
 void            help();
 
 #endif // _TALLALL_H_

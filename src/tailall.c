@@ -22,9 +22,6 @@
 
 #include "tailall.h"
 
-#define EVENT_SIZE  ( sizeof (struct inotify_event) )
-#define BUF_LEN     ( 1024 * ( EVENT_SIZE + 16 ) )
-
 int main( int argc, char **argv )
 {
     char dir[MAX_DIR_NAME_LENGTH]; /* monitoring directory name */
@@ -36,7 +33,6 @@ int main( int argc, char **argv )
 
     fd = inotify_init();
 
-    assert(fd > 0);
     if(fd < 0)
     {
         errfn("inotify_init(), %s", strerror(errno));
@@ -68,7 +64,6 @@ int main( int argc, char **argv )
         }
 
         ta = tailall_init(dir);
-        assert(ta != NULL);
 
         ret = scan_dir(ta, dir);
 
@@ -127,6 +122,7 @@ tailall_t* tailall_init(const char *path)
 file_t* file_init(folder_t *folder, const char *name)
 {
     assert(folder != NULL);
+    assert(name != NULL);
 
     char buf[MAX_DIR_NAME_LENGTH];
     file_t *file;
@@ -500,26 +496,26 @@ int scan_dir(tailall_t *ta, const char *path)
 
 void watching(tailall_t *ta)
 {
-    char buffer[BUF_LEN];
-
     while(1)
     {
         int length, i = 0;
         folder_t *folder;
         folder_data_t *folder_data;
         char *wdstr;
+        struct inotify_event *event;
 
-        length = read(ta->inotify, buffer, BUF_LEN);
+        length = read(ta->inotify, ta->ebuf, BUF_LEN);
 
         while (i < length)
         {
-            struct inotify_event *event = (struct inotify_event *) &buffer[i];
+            event = (struct inotify_event *) &ta->ebuf[i];
 
             debugf("watching() WD=%d MASK=%d COOKIE=%d LEN=%d DIR=%s\n", event->wd, event->mask, event->cookie, event->len, (event->mask & IN_ISDIR)?"yes":"no");
 
             wdstr = intdup(event->wd);
             folder_data = folder_data_get(ta->folder_table, wdstr);
-            assert(folder_data != NULL);
+            free(wdstr);
+
             if(folder_data == NULL)
             {
                 warnfn("Cannot find folder_data for WD %d", event->wd);
@@ -527,12 +523,12 @@ void watching(tailall_t *ta)
             }
 
             folder = (folder_t*) folder_data->data;
+
             if(folder_data == NULL)
             {
                 warnfn("folder_data doesn't include folder. folder_data_key:%s", folder_data->key);
                 continue;
             }
-            free(wdstr);
 
             debugf("Rise Path : %s\n", folder->path);
 
@@ -558,8 +554,8 @@ void watching(tailall_t *ta)
                         if(file != NULL)
                         {
                             folder_put_file(folder, file);
+                            tailing(ta, file);
                         }
-                        tailing(ta, file);
                     }
 
                 // 
@@ -683,13 +679,12 @@ int tailing(tailall_t *ta, file_t *file)
     assert(file != NULL);
     assert(ta != NULL);
 
-    char buf[FILE_BUF_SIZE];
     int ret, total;
 
-    memset(buf, 0, FILE_BUF_SIZE);
+    memset(ta->buf, 0, FILE_BUF_SIZE);
 
     total = 0;
-    while( (ret = read(file->fd, buf, FILE_BUF_SIZE-1)) > 0)
+    while( (ret = read(file->fd, ta->buf, FILE_BUF_SIZE-1)) > 0)
     {
         if(total == 0 && ta->last_tailing_file != file)
         {
@@ -697,8 +692,8 @@ int tailing(tailall_t *ta, file_t *file)
             outfn("# %s%s", file->folder->path, file->name);
         }
 
-        outf("%.*s", ret, buf);
-        memset(buf, 0, FILE_BUF_SIZE);
+        outf("%.*s", ret, ta->buf);
+        memset(ta->buf, 0, FILE_BUF_SIZE);
         total += ret;
     }
 

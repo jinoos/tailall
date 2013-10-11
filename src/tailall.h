@@ -12,6 +12,9 @@
 #define MAX_DIR_NAME_LENGTH     8192
 #define FILE_BUF_SIZE           1024*64
 
+#define EVENT_SIZE  ( sizeof (struct inotify_event) )
+#define BUF_LEN     ( 1024 * ( EVENT_SIZE + 16 ) )
+
 #ifdef DEBUG
 #define debugf(...) { fprintf(stdout, "DBUG - "); fprintf(stdout, __VA_ARGS__); fflush(stdout); }
 #define debugfn(...) { fprintf(stdout, "DBUG - "); fprintf(stdout, __VA_ARGS__); fprintf(stdout, "\n"); fflush(stdout); }
@@ -23,8 +26,8 @@
 #define errf(...) { fprintf(stderr, "ERR  - "); fprintf(stderr, __VA_ARGS__); fflush(stderr); }
 #define errfn(...) { fprintf(stderr, "ERR  - "); fprintf(stderr, __VA_ARGS__); fprintf(stderr, "\n");}
 
-#define warnf(...) { fprintf(stderr, "WARN - "); fprintf(stderr, __VA_ARGS__); fflush(stdout); }
-#define warnfn(...) { fprintf(stderr, "WARN - "); fprintf(stderr, __VA_ARGS__); fprintf(stdout, "\n"); fflush(stdout); }
+#define warnf(...) { fprintf(stderr, "WARN - "); fprintf(stderr, __VA_ARGS__); fflush(stderr); }
+#define warnfn(...) { fprintf(stderr, "WARN - "); fprintf(stderr, __VA_ARGS__); fprintf(stderr, "\n"); fflush(stderr); }
 
 #define infof(...) { fprintf(stderr, "INFO - "); fprintf(stdout, __VA_ARGS__); fflush(stdout); }
 #define infofn(...) { fprintf(stderr, "INFO - "); fprintf(stdout, __VA_ARGS__); fprintf(stdout, "\n"); fflush(stdout); }
@@ -88,6 +91,8 @@ struct _tailall_t
     int             inotify;
     file_t          *last_tailing_file;
     uint64_t        tailing_count;
+    char            buf[FILE_BUF_SIZE];
+    char            ebuf[BUF_LEN];
 };
 
 //
